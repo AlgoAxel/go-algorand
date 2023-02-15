@@ -88,6 +88,7 @@ type TransactionScope interface {
 
 	AccountsInitTest(tb testing.TB, initAccounts map[basics.Address]basics.AccountData, proto protocol.ConsensusVersion) (newDatabase bool)
 	AccountsInitLightTest(tb testing.TB, initAccounts map[basics.Address]basics.AccountData, proto config.ConsensusParams) (newDatabase bool, err error)
+	AccountsUpdateSchemaTest(ctx context.Context) (err error)
 }
 type sqlTransactionScope struct {
 	tx *sql.Tx
@@ -262,6 +263,10 @@ func (txs sqlTransactionScope) AccountsInitTest(tb testing.TB, initAccounts map[
 
 func (txs sqlTransactionScope) AccountsInitLightTest(tb testing.TB, initAccounts map[basics.Address]basics.AccountData, proto config.ConsensusParams) (newDatabase bool, err error) {
 	return AccountsInitLightTest(tb, txs.tx, initAccounts, proto)
+}
+
+func (txs sqlTransactionScope) AccountsUpdateSchemaTest(ctx context.Context) (err error) {
+	return AccountsUpdateSchemaTest(ctx, txs.tx)
 }
 
 func (bs sqlBatchScope) MakeCatchpointWriter() (CatchpointWriter, error) {

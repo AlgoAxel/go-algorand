@@ -81,8 +81,8 @@ func TestLedgerReloadTxTailHistoryAccess(t *testing.T) {
 
 	// reset tables and re-init again, similary to the catchpount apply code
 	// since the ledger has only genesis accounts, this recreates them
-	err = l.trackerDBs.Batch(func(ctx context.Context, tx store.BatchScope) error {
-		arw, err := tx.CreateAccountsWriter()
+	err = l.trackerDBs.Transaction(func(ctx context.Context, tx store.TransactionScope) error {
+		arw, err := tx.MakeAccountsReaderWriter()
 		if err != nil {
 			return err
 		}
@@ -139,27 +139,16 @@ func TestLedgerReloadTxTailHistoryAccess(t *testing.T) {
 		}
 	}
 
-	// drop new tables
-	// reloadLedger should migrate db properly
-	err = l.trackerDBs.Batch(func(ctx context.Context, tx store.BatchScope) error {
-		// 	var resetExprs = []string{
-		// 		`DROP TABLE IF EXISTS onlineaccounts`,
-		// 		`DROP TABLE IF EXISTS txtail`,
-		// 		`DROP TABLE IF EXISTS onlineroundparamstail`,
-		// 		`DROP TABLE IF EXISTS catchpointfirststageinfo`,
-		// 	}
-		// 	for _, stmt := range resetExprs {
-		// 		_, err0 := tx.ExecContext(ctx, stmt)
-		// 		if err0 != nil {
-		// 			return err0
-		// 		}
-		// 	}
-		return nil
-	})
-	require.NoError(t, err)
+	// reload the ledger and forward migrate using catchpoint write/read
+	temporaryDirectory := t.TempDir()
+	catchpointDataFilePath := filepath.Join(temporaryDirectory, "15.data")
+	catchpointFilePath := filepath.Join(temporaryDirectory, "15.catchpoint")
+	testWriteCatchpoint(t, l.trackerDB(), catchpointDataFilePath, catchpointFilePath, 0)
+	l2 := testNewLedgerFromCatchpoint(t, l.trackerDB(), catchpointFilePath)
+	defer l2.Close()
 
-	err = l.reloadLedger()
-	require.NoError(t, err)
+	// move the new ledger in as the original and assert
+	l = l2
 
 	source := fmt.Sprintf(`#pragma version 7
 int %d // 1000
@@ -440,26 +429,11 @@ func TestLedgerMigrateV6ShrinkDeltas(t *testing.T) {
 	temporaryDirectory := t.TempDir()
 	catchpointDataFilePath := filepath.Join(temporaryDirectory, "15.data")
 	catchpointFilePath := filepath.Join(temporaryDirectory, "15.catchpoint")
-	const maxResourcesPerChunk = 5
 	testWriteCatchpoint(t, l.trackerDB(), catchpointDataFilePath, catchpointFilePath, 0)
-	l.Close()
 	cfg.MaxAcctLookback = shorterLookback
 
-	// create a fresh ledger the same way we made the first one, and use it as a
-	// source for a tracker, building the actual second ledger from catchpoint
-	dbName2 := fmt.Sprintf("%s.%d.2", t.Name(), crypto.RandUint64())
-	lnew, err := OpenLedger(log, dbName2, inMem, genesisInitState, cfg)
-	require.NoError(t, err)
-	defer func() {
-		lnew.Close()
-		os.Remove(dbName2 + ".block.sqlite")
-		os.Remove(dbName2 + ".tracker.sqlite")
-		os.Remove(dbName2 + ".block.sqlite-shm")
-		os.Remove(dbName2 + ".tracker.sqlite-shm")
-		os.Remove(dbName2 + ".block.sqlite-wal")
-		os.Remove(dbName2 + ".tracker.sqlite-wal")
-	}()
-	l2 := testNewLedgerFromCatchpoint(t, lnew.trackerDB(), catchpointFilePath)
+	l2 := testNewLedgerFromCatchpoint(t, l.trackerDB(), catchpointFilePath)
+	l.Close()
 	defer l2.Close()
 
 	_, err = l2.OnlineTotals(basics.Round(proto.MaxBalLookback - shorterLookback))
