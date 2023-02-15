@@ -540,6 +540,10 @@ func TestFullCatchpointWriterOverflowAccounts(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestReloadTxTailHistoryAccess(t *testing.T) {
+	partitiontest.PartitionTest(t)
+}
+
 func testNewLedgerFromCatchpoint(t *testing.T, catchpointWriterReadAccess store.TrackerStore, filepath string) *Ledger {
 	// create a ledger.
 	var initState ledgercore.InitState

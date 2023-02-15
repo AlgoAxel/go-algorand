@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"testing"
@@ -41,6 +42,7 @@ import (
 	"github.com/algorand/go-algorand/data/transactions/logic"
 	"github.com/algorand/go-algorand/data/transactions/verify"
 	"github.com/algorand/go-algorand/ledger/ledgercore"
+	"github.com/algorand/go-algorand/ledger/store"
 	ledgertesting "github.com/algorand/go-algorand/ledger/testing"
 	"github.com/algorand/go-algorand/logging"
 	"github.com/algorand/go-algorand/protocol"
@@ -49,6 +51,454 @@ import (
 	"github.com/algorand/go-algorand/util/execpool"
 	"github.com/algorand/go-deadlock"
 )
+
+// TestLedgerReloadTxTailHistoryAccess checks txtail has MaxTxnLife + DeeperBlockHeaderHistory block headers
+// for TEAL after applying catchpoint.
+// Simulate catchpoints by the following:
+// 1. Say ledger is at version 6 (pre shorher deltas)
+// 2. Put 2000 empty blocks
+// 3. Reload and upgrade to version 7 (that's what catchpoint apply code does)
+// 4. Add 2001 block with a txn first=1001, last=2001 and block data access for 1000
+// 5. Expect the txn to be accepted
+func TestLedgerReloadTxTailHistoryAccess(t *testing.T) {
+	partitiontest.PartitionTest(t)
+
+	const preReleaseDBVersion = 6
+
+	dbName := fmt.Sprintf("%s.%d", t.Name(), crypto.RandUint64())
+	genesisInitState, initKeys := ledgertesting.GenerateInitState(t, protocol.ConsensusCurrentVersion, 10_000_000_000)
+	proto := config.Consensus[protocol.ConsensusCurrentVersion]
+	const inMem = true
+	cfg := config.GetDefaultLocal()
+
+	log := logging.TestingLog(t)
+	log.SetLevel(logging.Info)
+	l, err := OpenLedger(log, dbName, inMem, genesisInitState, cfg)
+	require.NoError(t, err)
+	defer func() {
+		l.Close()
+	}()
+
+	// reset tables and re-init again, similary to the catchpount apply code
+	// since the ledger has only genesis accounts, this recreates them
+	err = l.trackerDBs.Batch(func(ctx context.Context, tx store.BatchScope) error {
+		arw, err := tx.CreateAccountsWriter()
+		if err != nil {
+			return err
+		}
+
+		err0 := arw.AccountsReset(ctx)
+		if err0 != nil {
+			return err0
+		}
+		tp := store.TrackerDBParams{
+			InitAccounts:      l.GenesisAccounts(),
+			InitProto:         l.GenesisProtoVersion(),
+			GenesisHash:       l.GenesisHash(),
+			FromCatchpoint:    true,
+			CatchpointEnabled: l.catchpoint.catchpointEnabled(),
+			DbPathPrefix:      l.catchpoint.dbDirectory,
+			BlockDb:           l.blockDBs,
+		}
+		_, err0 = tx.RunMigrations(ctx, tp, l.log, preReleaseDBVersion /*target database version*/)
+		if err0 != nil {
+			return err0
+		}
+
+		if err0 := tx.AccountsUpdateSchemaTest(ctx); err != nil {
+			return err0
+		}
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	var sender basics.Address
+	var key *crypto.SignatureSecrets
+	for addr := range genesisInitState.Accounts {
+		if addr != testPoolAddr && addr != testSinkAddr {
+			sender = addr
+			key = initKeys[addr]
+			break
+		}
+	}
+
+	roundToTimeStamp := func(rnd int) int64 {
+		return int64(rnd*1000 + rnd)
+	}
+
+	blk := genesisInitState.Block
+	maxBlocks := 2 * int(proto.MaxTxnLife) // 2000 blocks to add
+	for i := 1; i <= maxBlocks; i++ {
+		blk.BlockHeader.Round++
+		blk.BlockHeader.TimeStamp = roundToTimeStamp(i)
+		err = l.AddBlock(blk, agreement.Certificate{})
+		require.NoError(t, err)
+		if i%100 == 0 || i == maxBlocks-1 {
+			l.WaitForCommit(blk.BlockHeader.Round)
+		}
+	}
+
+	// drop new tables
+	// reloadLedger should migrate db properly
+	err = l.trackerDBs.Batch(func(ctx context.Context, tx store.BatchScope) error {
+		// 	var resetExprs = []string{
+		// 		`DROP TABLE IF EXISTS onlineaccounts`,
+		// 		`DROP TABLE IF EXISTS txtail`,
+		// 		`DROP TABLE IF EXISTS onlineroundparamstail`,
+		// 		`DROP TABLE IF EXISTS catchpointfirststageinfo`,
+		// 	}
+		// 	for _, stmt := range resetExprs {
+		// 		_, err0 := tx.ExecContext(ctx, stmt)
+		// 		if err0 != nil {
+		// 			return err0
+		// 		}
+		// 	}
+		return nil
+	})
+	require.NoError(t, err)
+
+	err = l.reloadLedger()
+	require.NoError(t, err)
+
+	source := fmt.Sprintf(`#pragma version 7
+int %d // 1000
+block BlkTimestamp
+int %d // 10001000
+==
+`, proto.MaxTxnLife, roundToTimeStamp(int(proto.MaxTxnLife)))
+
+	ops, err := logic.AssembleString(source)
+	require.NoError(t, err)
+	approvalProgram := ops.Program
+
+	clearStateProgram := []byte("\x07") // empty
+	appcreateFields := transactions.ApplicationCallTxnFields{
+		ApprovalProgram:   approvalProgram,
+		ClearStateProgram: clearStateProgram,
+		GlobalStateSchema: basics.StateSchema{NumUint: 1},
+		LocalStateSchema:  basics.StateSchema{NumUint: 1},
+	}
+
+	correctTxHeader := transactions.Header{
+		Sender:      sender,
+		Fee:         basics.MicroAlgos{Raw: proto.MinTxnFee * 2},
+		FirstValid:  basics.Round(proto.MaxTxnLife + 1),
+		LastValid:   basics.Round(2*proto.MaxTxnLife + 1),
+		GenesisID:   genesisInitState.Block.GenesisID(),
+		GenesisHash: genesisInitState.GenesisHash,
+	}
+
+	appcreate := transactions.Transaction{
+		Type:                     protocol.ApplicationCallTx,
+		Header:                   correctTxHeader,
+		ApplicationCallTxnFields: appcreateFields,
+	}
+
+	stx := sign(map[basics.Address]*crypto.SignatureSecrets{sender: key}, appcreate)
+	txib, err := blk.EncodeSignedTxn(stx, transactions.ApplyData{})
+	require.NoError(t, err)
+
+	blk.BlockHeader.Round++
+	blk.BlockHeader.TimeStamp++
+	blk.TxnCounter++
+	blk.Payset = append(blk.Payset, txib)
+	blk.TxnCommitments, err = blk.PaysetCommit()
+	require.NoError(t, err)
+
+	err = l.AddBlock(blk, agreement.Certificate{})
+	require.NoError(t, err)
+
+	latest := l.Latest()
+	require.Equal(t, basics.Round(2*proto.MaxTxnLife+1), latest)
+
+	// add couple more blocks to have the block with `blk BlkTimestamp` to be dbRound + 1
+	// reload again and ensure this block can be replayed
+	programRound := blk.BlockHeader.Round
+	target := latest + basics.Round(cfg.MaxAcctLookback) - 1
+	blk = genesisInitState.Block
+	blk.BlockHeader.Round = latest
+	for i := latest + 1; i <= target; i++ {
+		blk.BlockHeader.Round++
+		blk.BlockHeader.TimeStamp = roundToTimeStamp(int(i))
+		err = l.AddBlock(blk, agreement.Certificate{})
+		require.NoError(t, err)
+	}
+
+	commitRoundLookback(basics.Round(cfg.MaxAcctLookback), l)
+	l.trackers.mu.RLock()
+	require.Equal(t, programRound, l.trackers.dbRound+1) // programRound is next to be replayed
+	l.trackers.mu.RUnlock()
+	err = l.reloadLedger()
+	require.NoError(t, err)
+}
+
+// TestLedgerMigrateV6ShrinkDeltas opens a ledger + dbV6, submits a bunch of txns,
+// then migrates db and reopens ledger, and checks that the state is correct
+func TestLedgerMigrateV6ShrinkDeltas(t *testing.T) {
+	partitiontest.PartitionTest(t)
+
+	prevAccountDBVersion := store.AccountDBVersion
+	defer func() {
+		store.AccountDBVersion = prevAccountDBVersion
+	}()
+	dbName := fmt.Sprintf("%s.%d", t.Name(), crypto.RandUint64())
+	testProtocolVersion := protocol.ConsensusVersion("test-protocol-migrate-shrink-deltas")
+	proto := config.Consensus[protocol.ConsensusV31]
+	proto.RewardsRateRefreshInterval = 200
+	config.Consensus[testProtocolVersion] = proto
+	defer func() {
+		delete(config.Consensus, testProtocolVersion)
+	}()
+	genesisInitState, initKeys := ledgertesting.GenerateInitState(t, testProtocolVersion, 10_000_000_000)
+	const inMem = false
+	cfg := config.GetDefaultLocal()
+	cfg.MaxAcctLookback = proto.MaxBalLookback
+	log := logging.TestingLog(t)
+	log.SetLevel(logging.Info) // prevent spamming with ledger.AddValidatedBlock debug message
+	trackerDB, blockDB, err := openLedgerDB(dbName, inMem)
+	require.NoError(t, err)
+	defer func() {
+		trackerDB.Close()
+		blockDB.Close()
+	}()
+	// create tables so online accounts can still be written
+	// err = trackerDB.Batch(func(ctx context.Context, tx *sql.Tx) error {
+	// 	if err := store.AccountsUpdateSchemaTest(ctx, tx); err != nil {
+	// 		return err
+	// 	}
+	// 	return nil
+	// })
+	//require.NoError(t, err)
+
+	l, err := OpenLedger(log, dbName, inMem, genesisInitState, cfg)
+	require.NoError(t, err)
+	defer func() {
+		l.Close()
+		os.Remove(dbName + ".block.sqlite")
+		os.Remove(dbName + ".tracker.sqlite")
+		os.Remove(dbName + ".block.sqlite-shm")
+		os.Remove(dbName + ".tracker.sqlite-shm")
+		os.Remove(dbName + ".block.sqlite-wal")
+		os.Remove(dbName + ".tracker.sqlite-wal")
+	}()
+
+	// remove online tracker in order to make v6 schema work
+	for i := range l.trackers.trackers {
+		if l.trackers.trackers[i] == l.trackers.acctsOnline {
+			l.trackers.trackers = append(l.trackers.trackers[:i], l.trackers.trackers[i+1:]...)
+			break
+		}
+	}
+	l.trackers.acctsOnline = nil
+	l.acctsOnline = onlineAccounts{}
+
+	maxBlocks := 1000
+	accounts := make(map[basics.Address]basics.AccountData, len(genesisInitState.Accounts))
+	keys := make(map[basics.Address]*crypto.SignatureSecrets, len(initKeys))
+	// regular addresses: all init accounts minus pools
+	addresses := make([]basics.Address, len(genesisInitState.Accounts)-2, len(genesisInitState.Accounts))
+	i := 0
+	for addr := range genesisInitState.Accounts {
+		if addr != testPoolAddr && addr != testSinkAddr {
+			addresses[i] = addr
+			i++
+		}
+		accounts[addr] = genesisInitState.Accounts[addr]
+		keys[addr] = initKeys[addr]
+	}
+	sort.SliceStable(addresses, func(i, j int) bool { return bytes.Compare(addresses[i][:], addresses[j][:]) == -1 })
+
+	onlineTotals := make([]basics.MicroAlgos, maxBlocks+1)
+	curAddressIdx := 0
+	maxValidity := basics.Round(20) // some number different from number of txns in blocks
+	txnIDs := make(map[basics.Round]map[transactions.Txid]struct{})
+	// run for maxBlocks rounds with random payment transactions
+	// generate numTxns txn per block
+	for i := 0; i < maxBlocks; i++ {
+		numTxns := crypto.RandUint64()%9 + 7
+		stxns := make([]transactions.SignedTxn, numTxns)
+		latest := l.Latest()
+		txnIDs[latest+1] = make(map[transactions.Txid]struct{})
+		for j := 0; j < int(numTxns); j++ {
+			feeMult := rand.Intn(5) + 1
+			amountMult := rand.Intn(1000) + 1
+			receiver := ledgertesting.RandomAddress()
+			txHeader := transactions.Header{
+				Sender:      addresses[curAddressIdx],
+				Fee:         basics.MicroAlgos{Raw: proto.MinTxnFee * uint64(feeMult)},
+				FirstValid:  latest + 1,
+				LastValid:   latest + maxValidity,
+				GenesisID:   t.Name(),
+				GenesisHash: crypto.Hash([]byte(t.Name())),
+			}
+
+			tx := transactions.Transaction{
+				Header: txHeader,
+			}
+
+			// have one txn be a keyreg txn that flips online to offline
+			// have all other txns be random payment txns
+			if j == 0 {
+				var keyregTxnFields transactions.KeyregTxnFields
+				// keep low accounts online, high accounts offline
+				// otherwise all accounts become offline eventually and no agreement balances to check
+				if curAddressIdx < len(addresses)/2 {
+					keyregTxnFields = transactions.KeyregTxnFields{
+						VoteFirst: latest + 1,
+						VoteLast:  latest + 100_000,
+					}
+					var votepk crypto.OneTimeSignatureVerifier
+					votepk[0] = byte(j % 256)
+					votepk[1] = byte(i % 256)
+					votepk[2] = byte(254)
+					var selpk crypto.VRFVerifier
+					selpk[0] = byte(j % 256)
+					selpk[1] = byte(i % 256)
+					selpk[2] = byte(255)
+
+					keyregTxnFields.VotePK = votepk
+					keyregTxnFields.SelectionPK = selpk
+				}
+				tx.Type = protocol.KeyRegistrationTx
+				tx.KeyregTxnFields = keyregTxnFields
+			} else {
+				correctPayFields := transactions.PaymentTxnFields{
+					Receiver: receiver,
+					Amount:   basics.MicroAlgos{Raw: uint64(100 * amountMult)},
+				}
+				tx.Type = protocol.PaymentTx
+				tx.PaymentTxnFields = correctPayFields
+			}
+
+			stxns[j] = sign(initKeys, tx)
+			curAddressIdx = (curAddressIdx + 1) % len(addresses)
+			txnIDs[latest+1][tx.ID()] = struct{}{}
+		}
+		err = l.addBlockTxns(t, genesisInitState.Accounts, stxns, transactions.ApplyData{})
+		require.NoError(t, err)
+		if i%100 == 0 || i == maxBlocks-1 {
+			l.WaitForCommit(latest + 1)
+		}
+		onlineTotals[i+1], err = l.accts.onlineTotals(basics.Round(i + 1))
+		require.NoError(t, err)
+	}
+
+	latest := l.Latest()
+	nextRound := latest + 1
+	balancesRound := nextRound.SubSaturate(basics.Round(proto.MaxBalLookback))
+
+	origBalances := make([]basics.MicroAlgos, len(addresses))
+	origRewardsBalances := make([]basics.MicroAlgos, len(addresses))
+	origAgreementBalances := make([]basics.MicroAlgos, len(addresses))
+	for i, addr := range addresses {
+		ad, rnd, err := l.LookupWithoutRewards(latest, addr)
+		require.NoError(t, err)
+		require.Equal(t, latest, rnd)
+		origBalances[i] = ad.MicroAlgos
+
+		acct, rnd, wo, err := l.LookupAccount(latest, addr)
+		require.NoError(t, err)
+		require.Equal(t, latest, rnd)
+		require.Equal(t, origBalances[i], wo)
+		origRewardsBalances[i] = acct.MicroAlgos
+
+		acct, rnd, _, err = l.LookupAccount(balancesRound, addr)
+		require.NoError(t, err)
+		require.Equal(t, balancesRound, rnd)
+		if acct.Status == basics.Online {
+			origAgreementBalances[i] = acct.MicroAlgos
+		} else {
+			origAgreementBalances[i] = basics.MicroAlgos{}
+		}
+	}
+
+	var nonZeros int
+	for _, bal := range origAgreementBalances {
+		if bal.Raw > 0 {
+			nonZeros++
+		}
+	}
+	require.Greater(t, nonZeros, 0)
+
+	// at round "maxBlocks" the ledger must have maxValidity blocks of transactions
+	for i := latest; i <= latest+maxValidity; i++ {
+		for txid := range txnIDs[i] {
+			require.NoError(t, l.CheckDup(proto, nextRound, i-maxValidity, i, txid, ledgercore.Txlease{}))
+		}
+	}
+
+	// check an error latest-1
+	for txid := range txnIDs[latest-1] {
+		require.Error(t, l.CheckDup(proto, nextRound, latest-maxValidity, latest-1, txid, ledgercore.Txlease{}))
+	}
+
+	shorterLookback := config.GetDefaultLocal().MaxAcctLookback
+	require.Less(t, shorterLookback, cfg.MaxAcctLookback)
+
+	// make a catchpoint from the first ledger. catchpoints are V6 structures
+	temporaryDirectory := t.TempDir()
+	catchpointDataFilePath := filepath.Join(temporaryDirectory, "15.data")
+	catchpointFilePath := filepath.Join(temporaryDirectory, "15.catchpoint")
+	const maxResourcesPerChunk = 5
+	testWriteCatchpoint(t, l.trackerDB(), catchpointDataFilePath, catchpointFilePath, 0)
+	l.Close()
+	cfg.MaxAcctLookback = shorterLookback
+
+	// create a fresh ledger the same way we made the first one, and use it as a
+	// source for a tracker, building the actual second ledger from catchpoint
+	dbName2 := fmt.Sprintf("%s.%d.2", t.Name(), crypto.RandUint64())
+	lnew, err := OpenLedger(log, dbName2, inMem, genesisInitState, cfg)
+	require.NoError(t, err)
+	defer func() {
+		lnew.Close()
+		os.Remove(dbName2 + ".block.sqlite")
+		os.Remove(dbName2 + ".tracker.sqlite")
+		os.Remove(dbName2 + ".block.sqlite-shm")
+		os.Remove(dbName2 + ".tracker.sqlite-shm")
+		os.Remove(dbName2 + ".block.sqlite-wal")
+		os.Remove(dbName2 + ".tracker.sqlite-wal")
+	}()
+	l2 := testNewLedgerFromCatchpoint(t, lnew.trackerDB(), catchpointFilePath)
+	defer l2.Close()
+
+	_, err = l2.OnlineTotals(basics.Round(proto.MaxBalLookback - shorterLookback))
+	require.Error(t, err)
+	for i := l2.Latest() - basics.Round(proto.MaxBalLookback-1); i <= l2.Latest(); i++ {
+		online, err := l2.OnlineTotals(i)
+		require.NoError(t, err)
+		require.Equal(t, onlineTotals[i], online)
+	}
+
+	for i, addr := range addresses {
+		ad, rnd, err := l2.LookupWithoutRewards(latest, addr)
+		require.NoError(t, err)
+		require.Equal(t, latest, rnd)
+		require.Equal(t, origBalances[i], ad.MicroAlgos)
+
+		acct, rnd, wo, err := l2.LookupAccount(latest, addr)
+		require.NoError(t, err)
+		require.Equal(t, latest, rnd)
+		require.Equal(t, origRewardsBalances[i], acct.MicroAlgos)
+		require.Equal(t, origBalances[i], wo)
+
+		oad, err := l2.LookupAgreement(balancesRound, addr)
+		require.NoError(t, err)
+		require.Equal(t, origAgreementBalances[i], oad.MicroAlgosWithRewards)
+	}
+
+	// at round maxBlocks the ledger must have maxValidity blocks of transactions, check
+	for i := latest; i <= latest+maxValidity; i++ {
+		for txid := range txnIDs[i] {
+			require.NoError(t, l2.CheckDup(proto, nextRound, i-maxValidity, i, txid, ledgercore.Txlease{}))
+		}
+	}
+
+	// check an error latest-1
+	for txid := range txnIDs[latest-1] {
+		require.Error(t, l2.CheckDup(proto, nextRound, latest-maxValidity, latest-1, txid, ledgercore.Txlease{}))
+	}
+}
 
 func sign(secrets map[basics.Address]*crypto.SignatureSecrets, t transactions.Transaction) transactions.SignedTxn {
 	var sig crypto.Signature

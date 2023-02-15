@@ -224,6 +224,9 @@ $(GOPATH1)/bin/ddconfig.sh: scripts/ddconfig.sh
 $(GOPATH1)/bin/%:
 	cp -f $< $@
 
+testo: build
+	$(GOTESTCOMMAND) $(GOTAGS) -race $(UNIT_TEST_SOURCES) -run '.*ShrinkDeltas.*' -timeout 1h -coverprofile=coverage.txt -covermode=atomic
+
 test: build
 	$(GOTESTCOMMAND) $(GOTAGS) -race $(UNIT_TEST_SOURCES) -timeout 1h -coverprofile=coverage.txt -covermode=atomic
 
