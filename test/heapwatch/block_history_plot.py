@@ -172,6 +172,7 @@ def process(path, args):
         ax4.set_title('TPS(10 round window)')
         ax4.plot(tpsv10)
     fig.tight_layout()
+    print(path+'_hist.svg')
     plt.savefig(path + '_hist.svg', format='svg')
     plt.savefig(path + '_hist.png', format='png')
 
