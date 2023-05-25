@@ -68,6 +68,7 @@ func randomDeterministicAccounts(initCfg PpConfig, out chan *crypto.SignatureSec
 		selected := make(map[uint32]bool, numAccounts)
 		for uint32(len(selected)) < numAccounts {
 			acct := uint32(rand.Int31n(int32(totalAccounts)))
+			log.Printf("Selecting Account %d", acct)
 			if selected[acct] {
 				continue // already picked this account
 			}

@@ -423,13 +423,12 @@ func (cfg DeployedNetwork) GenerateDatabaseFiles(fileCfgs BootstrappedNetwork, g
 
 	//fund src account with enough funding
 	rand.Seed(time.Now().UnixNano())
-	min := fileCfgs.BalanceRange[0]
-	max := fileCfgs.BalanceRange[1]
-	bal := rand.Int63n(max-min) + min
+	bal := 130240200000
 	bootstrappedNet.fundPerAccount = basics.MicroAlgos{Raw: uint64(bal)}
 	srcAcct := accounts[src]
 	srcAcct.MicroAlgos.Raw += bootstrappedNet.fundPerAccount.Raw*bootstrappedNet.nAccounts + bootstrappedNet.roundTxnCnt*fileCfgs.NumRounds
 	accounts[src] = srcAcct
+	log.Info("SOURCE...", srcAcct.MicroAlgos.Raw)
 
 	//init block
 	initState, err := generateInitState(accounts, &bootstrappedNet)
@@ -449,6 +448,7 @@ func (cfg DeployedNetwork) GenerateDatabaseFiles(fileCfgs BootstrappedNetwork, g
 	prev, _ := l.Block(l.Latest())
 	err = generateAccounts(src, fileCfgs.RoundTransactionsCount, prev, l, &bootstrappedNet, params, log)
 	if err != nil {
+	log.Info("errrrr", err)
 		return err
 	}
 
@@ -681,6 +681,7 @@ func createSignedTx(src basics.Address, round basics.Round, params config.Consen
 						Amount:   bootstrappedNet.fundPerAccount,
 					},
 				}
+				bootstrappedNet.log.Info("PAYMENT", src, dst, bootstrappedNet.fundPerAccount)
 				t := transactions.SignedTxn{Txn: tx}
 				sgtxns = append(sgtxns, t)
 			}
@@ -1068,10 +1069,8 @@ func extractPublicPort(address string) (port int, err error) {
 }
 
 func computeRootStorage(nodeCount, relayCount int) int {
-	// For now, we'll just use root storage -- assume short-lived instances
-	// 10 per node should be good for a week (add relayCount * 0 so param is used)
-	minGB := 20 + (nodeCount * 10) + (relayCount * 50)
-	return minGB
+	// hard code to force extra space on nodes
+	return 256
 }
 
 func computeSSDStorage(nodeCount, relayCount int) int {

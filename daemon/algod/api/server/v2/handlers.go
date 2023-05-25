@@ -376,6 +376,7 @@ func (v2 *Handlers) AccountInformation(ctx echo.Context, address string, params 
 		if err != nil {
 			return internalError(ctx, err, errFailedLookingUpLedger, v2.Log)
 		}
+		v2.Log.Info("AXELAXEL: ACCOUNT INFO:", record)
 		totalResults := record.TotalAssets + record.TotalAssetParams + record.TotalAppLocalStates + record.TotalAppParams
 		if totalResults > maxResults {
 			v2.Log.Infof("MaxAccountAPIResults limit %d exceeded, total results %d", maxResults, totalResults)
