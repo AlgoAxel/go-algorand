@@ -42,6 +42,7 @@ import (
 	"github.com/algorand/go-algorand/protocol"
 	"github.com/algorand/go-algorand/util"
 	"github.com/algorand/go-algorand/util/codecs"
+	"github.com/labstack/gommon/log"
 )
 
 const genesisFolderName = "genesisdata"
@@ -353,7 +354,7 @@ func (cfg DeployedNetwork) BuildNetworkFromTemplate(buildCfg BuildConfig, rootDi
 	return
 }
 
-//GenerateDatabaseFiles generates database files according to the configurations
+// GenerateDatabaseFiles generates database files according to the configurations
 func (cfg DeployedNetwork) GenerateDatabaseFiles(fileCfgs BootstrappedNetwork, genesisFolder string) error {
 
 	accounts := make(map[basics.Address]basics.AccountData)
@@ -393,16 +394,16 @@ func (cfg DeployedNetwork) GenerateDatabaseFiles(fileCfgs BootstrappedNetwork, g
 	log := logging.NewLogger()
 
 	bootstrappedNet := netState{
-		nAssets:       fileCfgs.GeneratedAssetsCount,
-		nApplications: fileCfgs.GeneratedApplicationCount,
-		txnState:      protocol.PaymentTx,
-		roundTxnCnt:   fileCfgs.RoundTransactionsCount,
-		round:         basics.Round(0),
-		genesisID:     genesis.ID(),
-		genesisHash:   genesis.Hash(),
-		poolAddr:      poolAddr,
-		sinkAddr:      sinkAddr,
-		log:           log,
+		nAssets:           fileCfgs.GeneratedAssetsCount,
+		nApplications:     fileCfgs.GeneratedApplicationCount,
+		txnState:          protocol.PaymentTx,
+		roundTxnCnt:       fileCfgs.RoundTransactionsCount,
+		round:             basics.Round(0),
+		genesisID:         genesis.ID(),
+		genesisHash:       genesis.Hash(),
+		poolAddr:          poolAddr,
+		sinkAddr:          sinkAddr,
+		log:               log,
 		deterministicKeys: fileCfgs.DeterministicKeys,
 	}
 
@@ -448,7 +449,7 @@ func (cfg DeployedNetwork) GenerateDatabaseFiles(fileCfgs BootstrappedNetwork, g
 	prev, _ := l.Block(l.Latest())
 	err = generateAccounts(src, fileCfgs.RoundTransactionsCount, prev, l, &bootstrappedNet, params, log)
 	if err != nil {
-	log.Info("errrrr", err)
+		log.Info("errrrr", err)
 		return err
 	}
 
@@ -491,6 +492,7 @@ func getGenesisAlloc(name string, allocation []bookkeeping.GenesisAllocation) bo
 
 // keypair returns a random key, unless deterministic is true, which will set i as the seed for key generation.
 func keypair(i uint64, deterministic bool) *crypto.SignatureSecrets {
+	log.Infof("generating with seed %d", i)
 	var seed crypto.Seed
 	if deterministic {
 		binary.LittleEndian.PutUint64(seed[:], i)
@@ -667,7 +669,8 @@ func createSignedTx(src basics.Address, round basics.Round, params config.Consen
 
 		if !bootstrappedNet.accountsCreated {
 			for i := uint64(0); i < n; i++ {
-				secretDst := keypair(i, bootstrappedNet.deterministicKeys)
+				offsetI := i + (uint64(round) * 20000)
+				secretDst := keypair(offsetI, bootstrappedNet.deterministicKeys)
 				dst := basics.Address(secretDst.SignatureVerifier)
 				bootstrappedNet.accounts = append(bootstrappedNet.accounts, dst)
 
@@ -681,7 +684,9 @@ func createSignedTx(src basics.Address, round basics.Round, params config.Consen
 						Amount:   bootstrappedNet.fundPerAccount,
 					},
 				}
-				bootstrappedNet.log.Info("PAYMENT", src, dst, bootstrappedNet.fundPerAccount)
+				//bootstrappedNet.log.Info("Index: ", i)
+				bootstrappedNet.log.Info("I: ", offsetI)
+				//bootstrappedNet.log.Info("PAYMENT", src, dst, bootstrappedNet.fundPerAccount)
 				t := transactions.SignedTxn{Txn: tx}
 				sgtxns = append(sgtxns, t)
 			}

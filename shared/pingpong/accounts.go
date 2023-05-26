@@ -68,6 +68,7 @@ func randomDeterministicAccounts(initCfg PpConfig, out chan *crypto.SignatureSec
 		selected := make(map[uint32]bool, numAccounts)
 		for uint32(len(selected)) < numAccounts {
 			acct := uint32(rand.Int31n(int32(totalAccounts)))
+			log.Printf("Using Seed %d", acct)
 			log.Printf("Selecting Account %d", acct)
 			if selected[acct] {
 				continue // already picked this account
@@ -86,6 +87,7 @@ func randomDeterministicAccounts(initCfg PpConfig, out chan *crypto.SignatureSec
 func sequentialDeterministicAccounts(initCfg PpConfig, out chan *crypto.SignatureSecrets) {
 	for i := uint32(0); i < initCfg.NumPartAccounts; i++ {
 		acct := uint64(i) + uint64(initCfg.GeneratedAccountsOffset)
+		log.Printf("Selecting Account %d", acct)
 		var seed crypto.Seed
 		binary.LittleEndian.PutUint64(seed[:], uint64(acct))
 		out <- crypto.GenerateSignatureSecrets(seed)
