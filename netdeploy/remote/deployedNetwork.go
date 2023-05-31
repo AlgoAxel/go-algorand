@@ -22,8 +22,12 @@ import (
 	"fmt"
 	"io/fs"
 	"math/rand"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/pprof"
 	"strconv"
 	"strings"
 	"time"
@@ -42,7 +46,6 @@ import (
 	"github.com/algorand/go-algorand/protocol"
 	"github.com/algorand/go-algorand/util"
 	"github.com/algorand/go-algorand/util/codecs"
-	"github.com/labstack/gommon/log"
 )
 
 const genesisFolderName = "genesisdata"
@@ -492,7 +495,6 @@ func getGenesisAlloc(name string, allocation []bookkeeping.GenesisAllocation) bo
 
 // keypair returns a random key, unless deterministic is true, which will set i as the seed for key generation.
 func keypair(i uint64, deterministic bool) *crypto.SignatureSecrets {
-	log.Infof("generating with seed %d", i)
 	var seed crypto.Seed
 	if deterministic {
 		binary.LittleEndian.PutUint64(seed[:], i)
@@ -530,6 +532,8 @@ func generateInitState(accounts map[basics.Address]basics.AccountData, bootstrap
 	initState.GenesisHash = bootstrappedNet.genesisHash
 	return initState, nil
 }
+
+var onlyOne = true
 
 func createBlock(src basics.Address, prev bookkeeping.Block, roundTxnCnt uint64, bootstrappedNet *netState, csParams config.ConsensusParams, log logging.Logger) (bookkeeping.Block, error) {
 	payset := make([]transactions.SignedTxnInBlock, 0, roundTxnCnt)
@@ -576,6 +580,31 @@ func createBlock(src basics.Address, prev bookkeeping.Block, roundTxnCnt uint64,
 	}
 
 	log.Infof("created block[%d] %d txns", block.BlockHeader.Round, len(payset))
+
+	if onlyOne {
+		onlyOne = false
+		go func() {
+			log.Info(http.ListenAndServe("localhost:8001", nil))
+		}()
+	}
+
+	var rtm runtime.MemStats
+	runtime.ReadMemStats(&rtm)
+	const meg = 1024 * 1024
+	//log.Infof("%5d\t%14d\t%13d\t%7d\n", 0, rtm.TotalAlloc/meg, rtm.HeapAlloc/meg, rtm.Mallocs-rtm.Frees)
+	log.Infof("HEAPIDLE %14d", rtm.HeapIdle/meg)
+
+	runtime.GC()
+	memprofile := fmt.Sprintf("pprof/netgoal-memprof-%d", block.BlockHeader.Round)
+	f, err := os.Create(memprofile)
+	if err != nil {
+		log.Infof("MEMPROF ERR: ", err)
+	}
+	err = pprof.WriteHeapProfile(f)
+	if err != nil {
+		log.Infof("WRITE HEAP PROF ERR: ", err)
+	}
+	f.Close()
 
 	return block, nil
 }
@@ -685,7 +714,6 @@ func createSignedTx(src basics.Address, round basics.Round, params config.Consen
 					},
 				}
 				//bootstrappedNet.log.Info("Index: ", i)
-				bootstrappedNet.log.Info("I: ", offsetI)
 				//bootstrappedNet.log.Info("PAYMENT", src, dst, bootstrappedNet.fundPerAccount)
 				t := transactions.SignedTxn{Txn: tx}
 				sgtxns = append(sgtxns, t)
