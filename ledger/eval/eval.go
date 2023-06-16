@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/algorand/go-algorand/config"
 	"github.com/algorand/go-algorand/crypto"
@@ -35,6 +36,7 @@ import (
 	"github.com/algorand/go-algorand/logging"
 	"github.com/algorand/go-algorand/protocol"
 	"github.com/algorand/go-algorand/util/execpool"
+	"github.com/algorand/go-algorand/util/metrics"
 )
 
 // LedgerForCowBase represents subset of Ledger functionality needed for cow business
@@ -1556,6 +1558,11 @@ func (validator *evalTxValidator) run() {
 // AddBlock: Eval(context.Background(), l, blk, false, txcache, nil)
 // tracker:  Eval(context.Background(), l, blk, false, txcache, nil)
 func Eval(ctx context.Context, l LedgerForEvaluator, blk bookkeeping.Block, validate bool, txcache verify.VerifiedTransactionCache, executionPool execpool.BacklogPool, tracer logic.EvalTracer) (ledgercore.StateDelta, error) {
+	start := time.Now()
+	defer func() {
+		evalEvalDurationMicros.AddMicrosecondsSince(start, nil)
+	}()
+
 	// flush the pending writes in the cache to make everything read so far available during eval
 	l.FlushCaches()
 
@@ -1710,3 +1717,7 @@ transactionGroupLoop:
 
 	return eval.state.deltas(), nil
 }
+
+var evalCacheMissAccounts = metrics.NewCounter("eval_cache_miss_accounts", "missed accounts")
+var evalPrefetchMissAccounts = metrics.NewCounter("eval_prefetch_miss_accounts", "missed accounts")
+var evalEvalDurationMicros = metrics.NewCounter("eval_duration_micros", "µs spent")
