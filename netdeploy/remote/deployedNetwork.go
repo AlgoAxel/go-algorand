@@ -1090,13 +1090,8 @@ func extractPublicPort(address string) (port int, err error) {
 }
 
 func computeRootStorage(nodeCount, relayCount int) int {
-	// For now, we'll just use root storage -- assume short-lived instances
-	// 10 per node should be good for a week (add relayCount * 0 so param is used)
-	minGB := 20 + (nodeCount * 10) + (relayCount * 50)
-	return minGB
-	// TODO: this function appears to insufficiently provision EBS nodes in some cases
-	// if your nodes have insufficient storage, consider using a reasonable hardcoded value like
-	// return 256
+	// overloaded
+	return 256
 }
 
 func computeSSDStorage(nodeCount, relayCount int) int {
