@@ -81,8 +81,8 @@ var once sync.Once
 func Init() {
 	once.Do(func() {
 		// By default, log to stderr (logrus's default), only warnings and above.
-		baseLogger = NewLogger()
-		baseLogger.SetLevel(Warn)
+		baseLogger = NoopLogger{}
+		//baseLogger.SetLevel(Warn)
 	})
 }
 
@@ -144,9 +144,6 @@ type Logger interface {
 	SetJSONFormatter()
 
 	IsLevelEnabled(level Level) bool
-
-	// source adds file, line and function fields to the event
-	source() *logrus.Entry
 
 	// Adds a hook to the logger
 	AddHook(hook logrus.Hook)
@@ -319,6 +316,7 @@ func (l logger) SetJSONFormatter() {
 	l.entry.Logger.Formatter = &logrus.JSONFormatter{TimestampFormat: "2006-01-02T15:04:05.000000Z07:00"}
 }
 
+// source adds file, line and function fields to the event
 func (l logger) source() *logrus.Entry {
 	event := l.entry
 
