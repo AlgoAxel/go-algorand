@@ -34,7 +34,7 @@ SRCPATH=${SCRIPTPATH}/..
 export CHANNEL=$2
 export FULLVERSION=$($SRCPATH/scripts/compute_build_number.sh -f)
 
-TEMPDIR=$(mktemp -d -t "upload_config.tmp.XXXXXX")
+TEMPDIR=$(mktemp -d --tmpdir=/data/mytmp -t "upload_config.tmp.XXXXXX")
 TARFILE=${TEMPDIR}/config_${CHANNEL}_${FULLVERSION}.tar.gz
 
 cd $1

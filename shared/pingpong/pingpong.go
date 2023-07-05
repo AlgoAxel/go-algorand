@@ -279,6 +279,7 @@ func computeAccountMinBalance(client *libgoal.Client, cfg PpConfig) (fundingRequ
 	if cfg.MinAccountFunds > fundingRequiredBalance {
 		fundingRequiredBalance = cfg.MinAccountFunds
 	}
+	fundingRequiredBalance = 100000
 
 	return
 }
